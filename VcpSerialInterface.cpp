@@ -6,30 +6,27 @@
  */
 
 #include "VcpSerialInterface.h"
-#include "usbd_cdc_if.h"
-#include "AbstractUpLayer.h"
-#include <Log/Log.h>
+#include "mprotocol-server/AbstractUpLayer.h"
 
-#define TX_BUFFER_SIZE 512
+#define LOG_PRINTF(...)
 
-/// CDC device access
-extern USBD_HandleTypeDef *hUsbDevice_0;
+VcpSerialInterface* VcpSerialInterface::instance = NULL;
 
 static int8_t SerialIface_CDC_Receive_FS (uint8_t* Buf, uint32_t *Len);
 
-LOG_TAG(VCP);
 
-VcpSerialInterface::VcpSerialInterface() {
-	txBuffer = new uint8_t[TX_BUFFER_SIZE];
-	txPosition = 0;
-	txOverrunCount = 0;
+VcpSerialInterface::VcpSerialInterface(USBD_HandleTypeDef* usbDevice, USBD_CDC_ItfTypeDef* fops, uint16_t txBufferSize) {
+	this->usbDevice = usbDevice;
+	this->fops = fops;
+
+	this->txBuffer = new uint8_t[txBufferSize];
+	this->txBufferSize = txBufferSize;
+	this->txPosition = 0;
+	this->txOverrunCount = 0;
+	instance = this;
 }
 
-VcpSerialInterface* VcpSerialInterface::getInstance() {
-	static VcpSerialInterface* instance = NULL;
-	if (instance == NULL) {
-		instance = new VcpSerialInterface();
-	}
+VcpSerialInterface* VcpSerialInterface::getExistingInstance() {
 	return instance;
 }
 
@@ -38,18 +35,18 @@ VcpSerialInterface::~VcpSerialInterface() {
 }
 
 void VcpSerialInterface::listen() {
-	  USBD_Interface_fops_FS.Receive = SerialIface_CDC_Receive_FS;
+	  fops->Receive = SerialIface_CDC_Receive_FS;
 }
 
 bool VcpSerialInterface::isOpen() {
-	return (hUsbDevice_0 != NULL);
+	return (usbDevice != NULL);
 }
 
 void VcpSerialInterface::handler() {
 	// USB CDC internal TX buffer limitation
 	static const uint16_t PacketSize = 256;
 
-	if (hUsbDevice_0 == NULL) {
+	if (usbDevice == NULL) {
 		return;	// cannot use VCP before the USB device is connected
 	}
 
@@ -63,7 +60,7 @@ void VcpSerialInterface::handler() {
 			CDC_Transmit_FS(data, packetLen);
 
 			// get handle to USB CDC device
-			USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef*) hUsbDevice_0->pClassData;
+			USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef*) usbDevice->pClassData;
 			// wait for CDC to finish transmission
 			while (hcdc->TxState == 1);
 
@@ -74,13 +71,13 @@ void VcpSerialInterface::handler() {
 
 	// create log message that will be sent out on the next call
 	if (txOverrunCount > 0) {
-		Log::Error(VCP, "TX overrun", txOverrunCount);
+		LOG_PRINTF("TX overrun %d", txOverrunCount);
 		txOverrunCount = 0;
 	}
 }
 
 bool VcpSerialInterface::writeBytes(const uint8_t* bytes, uint16_t length) {
-	if (txPosition + length > TX_BUFFER_SIZE) {
+	if (txPosition + length > txBufferSize) {
 		txOverrunCount += length;
 		return false;
 	}
@@ -90,6 +87,7 @@ bool VcpSerialInterface::writeBytes(const uint8_t* bytes, uint16_t length) {
 }
 
 bool VcpSerialInterface::receiveBytes(const uint8_t* bytes, uint16_t len) {
+	USBD_CDC_ReceivePacket(usbDevice);
 	if (uplayer == NULL) {
 		return false;
 	}
@@ -97,8 +95,7 @@ bool VcpSerialInterface::receiveBytes(const uint8_t* bytes, uint16_t len) {
 }
 
 static int8_t SerialIface_CDC_Receive_FS(uint8_t* Buf, uint32_t *Len) {
-	USBD_CDC_ReceivePacket(hUsbDevice_0);
-	bool success = VcpSerialInterface::getInstance()->receiveBytes(Buf, (uint16_t) *Len);
+	bool success = VcpSerialInterface::getExistingInstance()->receiveBytes(Buf, (uint16_t) *Len);
 
 	return success ? USBD_OK : USBD_BUSY;
 }
